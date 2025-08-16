@@ -79,10 +79,11 @@ def create_model(state: AgentState) -> AgentState:
     prompt = (
         "Erzeuge ein JSON-Objekt für ein kompaktes Performance-Modell mit Feldern:\n"
         "workload_rps, response_size_kb, latency_p95_ms, service_count, db_type_qps, resources_estimate\n"
-        "Die resources_estimate ist eine grobe Schätzung (cpu_cores, ram_mb, net_mbps) basierend auf den Parametern.\n"
+        "Die resources_estimate ist eine grobe Schätzung (cpu_cores,total processor utilization in all cores, ram_mb, net_mbps) basierend auf den Parametern.\n"
         f"Parameter: {a}\n"
-        "Antworte NUR mit JSON."
-        "Antworte NUR mit gültigem JSON. Kein Text, keine Codeblöcke, keine ```-Markierungen."
+        "Antworte NUR mit JSON.\n" 
+        "db_type_qps sollte ein String wie 'Postgres 120' oder 'MongoDB 500' sein.\n"
+
     )
     resp = llm.invoke(prompt).content
     # Falls Codeblock-Markup vorhanden ist, entfernen:
@@ -94,7 +95,7 @@ def create_model(state: AgentState) -> AgentState:
     try:
         data = json.loads(resp)
         model = PerfModel(**data)
-        print("\n[Agent] Vorschlag Performance-Modell:\n", model.model_dump_json(indent=2, ensure_ascii=False))
+        print("\n[Agent] Vorschlag Performance-Modell:\n", json.dumps(model.model_dump(), indent=2, ensure_ascii=False))
         state["model"] = model.model_dump()
     except Exception as e:
         print("\n[Agent] Fehler beim Parsen/Validieren:", e, "\nRohantwort:", resp)
@@ -147,5 +148,4 @@ if __name__ == "__main__":
             break
         rounds += 1
 
-    # finales Modell erzeugen
-    state = app.invoke(state, config={"configurable": {"thread_id": "gemini-loop-1"}})
+
