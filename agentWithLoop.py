@@ -58,18 +58,6 @@ def evaluate(state: AgentState) -> AgentState:
     return state
 
 def ask_next(state: AgentState) -> AgentState:
-    missing = state.get("missing", [])
-    if not missing:
-        return state
-    key = missing[0]
-    questions = {
-        "rps": "Wie viele Requests/s (rps)?",
-        "resp_size_kb": "Durchschnittliche Antwortgröße (resp_size_kb)?",
-        "latency_p95_ms": "Ziel-Latenz p95 (latency_p95_ms)?",
-        "service_count": "Wieviele Services im kritischen Pfad (service_count)?",
-        "db_type_qps": "DB-Typ und erwartete QPS (db_type_qps)?",
-    }
-    print(f"[Agent] {questions[key]} Bitte im Format key=value antworten.")
     state["awaiting_input"] = True  # signalisiert: Stop/Turn-Ende
     return state
 
@@ -113,8 +101,10 @@ graph.add_node("create_model", create_model)
 graph.set_entry_point("ask_defaults")
 graph.add_edge("ask_defaults", "evaluate")
 graph.add_conditional_edges("evaluate", need_more, {"more": "ask_next", "enough": "create_model"})
-graph.add_edge("ask_next", END)
-app = graph.compile(checkpointer=MemorySaver())
+graph.add_edge("ask_next", "evaluate")
+graph.add_edge("create_model", END)
+app = graph.compile(checkpointer=MemorySaver(),
+                    interrupt_before=["ask_next"])
 
 # ---- Mini-CLI (Konsole) ----
 def parse_user_kv(text: str) -> Dict[str, str]:
@@ -126,14 +116,29 @@ def parse_user_kv(text: str) -> Dict[str, str]:
     return out
 
 if __name__ == "__main__":
+    cfg = {"configurable": {"thread_id": "gemini-loop-1"}}
     state: AgentState = {"answers": {}, "messages": []}
     # Start
-    state = app.invoke(state, config={"configurable": {"thread_id": "gemini-loop-1"}})
+    state = app.invoke(state, config=cfg)
 
     # Loop: bis alle REQUIRED_KEYS vorhanden sind
-    max_rounds = 6
+    max_rounds = 10
     rounds = 0
     while rounds < max_rounds:
+        missing = state.get("missing", [])
+        if not missing:
+            # genug Infos -> create_model wird im nächsten Resume ausgeführt / oder ist schon durch
+            break
+
+        key = missing[0]
+        questions = {
+            "rps": "Wie viele Requests/s (rps)?",
+            "resp_size_kb": "Durchschnittliche Antwortgröße (resp_size_kb)?",
+            "latency_p95_ms": "Ziel-Latenz p95 (latency_p95_ms)?",
+            "service_count": "Wieviele Services im kritischen Pfad (service_count)?",
+            "db_type_qps": "DB-Typ und erwartete QPS (db_type_qps)?",
+        }
+        print(f"[Agent] {questions[key]} Bitte im Format key=value antworten.")
         user = input("\nDu: ").strip()
         if user.lower() in {"exit", "quit", "stop"}:
             break
@@ -142,10 +147,11 @@ if __name__ == "__main__":
         state["answers"].update(kv)
         state["awaiting_input"] = False
 
+        app.update_state(cfg, state)
+
+
         # ein Schritt im Graph
-        state = app.invoke(state, config={"configurable": {"thread_id": "gemini-loop-1"}})
-        if not state.get("missing"):
-            break
+        state = app.invoke(None, config=cfg)
         rounds += 1
 
 
