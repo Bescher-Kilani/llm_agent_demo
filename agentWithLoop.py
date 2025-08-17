@@ -4,9 +4,27 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 import json
+from dotenv import load_dotenv
+import os
+from langsmith import traceable
+from langchain_core.tracers import LangChainTracer
+from langsmith import Client
+
+
+
+load_dotenv()
+print("LangChain Projekt:", os.getenv("LANGCHAIN_PROJECT"))
+print("LangChain API Key gesetzt:", bool(os.getenv("LANGCHAIN_API_KEY")))
+
+
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
+
+
+tracer = LangChainTracer()
+
 
 # ---- LLM (Gemini) ----
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
+
 
 # ---- State ----
 class AgentState(TypedDict, total=False):
@@ -34,7 +52,7 @@ class PerfModel(BaseModel):
     db_type_qps: str
     resources_estimate: Dict[str, float]  # z.B. {"cpu_cores": 0.5, "ram_mb": 256, "net_mbps": 5.0}
 
-# ---- Nodes ----
+@traceable(name="ask_defaults")
 def ask_defaults(state: AgentState) -> AgentState:
     if state.get("asked_defaults"):
         return state
@@ -48,6 +66,7 @@ def ask_defaults(state: AgentState) -> AgentState:
     state["asked_defaults"] = True
     return state
 
+@traceable(name="evaluate")
 def evaluate(state: AgentState) -> AgentState:
     answers = dict(state.get("answers", {}))
     # Nimm die letzte Nutzereingabe aus der Konsole ab (wir lesen gleich in main)
@@ -57,10 +76,12 @@ def evaluate(state: AgentState) -> AgentState:
     state["missing"] = missing
     return state
 
+@traceable(name="ask_next")
 def ask_next(state: AgentState) -> AgentState:
     state["awaiting_input"] = True  # signalisiert: Stop/Turn-Ende
     return state
 
+@traceable(name="create_model")
 def create_model(state: AgentState) -> AgentState:
     a = state.get("answers", {})
     # LLM um JSON bitten
@@ -89,6 +110,7 @@ def create_model(state: AgentState) -> AgentState:
         print("\n[Agent] Fehler beim Parsen/Validieren:", e, "\nRohantwort:", resp)
     return state
 
+@traceable(name="need_more")
 def need_more(state: AgentState) -> Literal["more", "enough"]:
     return "more" if state.get("missing") else "enough"
 
@@ -106,7 +128,8 @@ graph.add_edge("create_model", END)
 app = graph.compile(checkpointer=MemorySaver(),
                     interrupt_before=["ask_next"])
 
-# ---- Mini-CLI (Konsole) ----
+
+@traceable(name="parse_user_kv")
 def parse_user_kv(text: str) -> Dict[str, str]:
     out = {}
     for part in text.split(","):
@@ -116,7 +139,12 @@ def parse_user_kv(text: str) -> Dict[str, str]:
     return out
 
 if __name__ == "__main__":
-    cfg = {"configurable": {"thread_id": "gemini-loop-1"}}
+    cfg = {
+        "configurable": {
+            "thread_id": "gemini-loop-1"
+        },
+        "callbacks":[tracer]  # <- Tracer aktivieren
+    }
     state: AgentState = {"answers": {}, "messages": []}
     # Start
     state = app.invoke(state, config=cfg)
