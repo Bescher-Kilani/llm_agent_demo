@@ -1,3 +1,4 @@
+
 from typing import TypedDict, Dict, List, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -9,6 +10,11 @@ import os
 from langsmith import traceable
 from langchain_core.tracers import LangChainTracer
 from langsmith import Client
+from openai import OpenAI
+from langsmith.wrappers import wrap_openai
+from langsmith.run_trees import RunTree
+from langsmith import Client
+from langsmith.run_helpers import trace
 
 
 
@@ -17,11 +23,12 @@ print("LangChain Projekt:", os.getenv("LANGCHAIN_PROJECT"))
 print("LangChain API Key gesetzt:", bool(os.getenv("LANGCHAIN_API_KEY")))
 
 
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
-
+#llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
+client = wrap_openai(OpenAI())
 
 tracer = LangChainTracer()
 
+c=Client()
 
 # ---- LLM (Gemini) ----
 
@@ -52,7 +59,7 @@ class PerfModel(BaseModel):
     db_type_qps: str
     resources_estimate: Dict[str, float]  # z.B. {"cpu_cores": 0.5, "ram_mb": 256, "net_mbps": 5.0}
 
-@traceable(name="ask_defaults")
+@traceable
 def ask_defaults(state: AgentState) -> AgentState:
     if state.get("asked_defaults"):
         return state
@@ -66,7 +73,7 @@ def ask_defaults(state: AgentState) -> AgentState:
     state["asked_defaults"] = True
     return state
 
-@traceable(name="evaluate")
+@traceable
 def evaluate(state: AgentState) -> AgentState:
     answers = dict(state.get("answers", {}))
     # Nimm die letzte Nutzereingabe aus der Konsole ab (wir lesen gleich in main)
@@ -76,12 +83,12 @@ def evaluate(state: AgentState) -> AgentState:
     state["missing"] = missing
     return state
 
-@traceable(name="ask_next")
+@traceable
 def ask_next(state: AgentState) -> AgentState:
     state["awaiting_input"] = True  # signalisiert: Stop/Turn-Ende
     return state
 
-@traceable(name="create_model")
+@traceable
 def create_model(state: AgentState) -> AgentState:
     a = state.get("answers", {})
     # LLM um JSON bitten
@@ -94,7 +101,8 @@ def create_model(state: AgentState) -> AgentState:
         "db_type_qps sollte ein String wie 'Postgres 120' oder 'MongoDB 500' sein.\n"
 
     )
-    resp = llm.invoke(prompt).content
+    resp= client.responses.create(model="gpt-4o-mini",input=prompt).output_text
+    #resp = llm.invoke(prompt).content
     # Falls Codeblock-Markup vorhanden ist, entfernen:
     if resp.strip().startswith("```"):
         resp = resp.strip().strip("`")
@@ -110,7 +118,7 @@ def create_model(state: AgentState) -> AgentState:
         print("\n[Agent] Fehler beim Parsen/Validieren:", e, "\nRohantwort:", resp)
     return state
 
-@traceable(name="need_more")
+
 def need_more(state: AgentState) -> Literal["more", "enough"]:
     return "more" if state.get("missing") else "enough"
 
@@ -129,7 +137,8 @@ app = graph.compile(checkpointer=MemorySaver(),
                     interrupt_before=["ask_next"])
 
 
-@traceable(name="parse_user_kv")
+
+
 def parse_user_kv(text: str) -> Dict[str, str]:
     out = {}
     for part in text.split(","):
@@ -140,46 +149,53 @@ def parse_user_kv(text: str) -> Dict[str, str]:
 
 if __name__ == "__main__":
     cfg = {
-        "configurable": {
-            "thread_id": "gemini-loop-1"
-        },
-        "callbacks":[tracer]  # <- Tracer aktivieren
+        "configurable": {"thread_id": "gemini-loop-1"},
+        "callbacks": [tracer],
+        "run_name": "PerfModel Graph",
     }
-    state: AgentState = {"answers": {}, "messages": []}
-    # Start
-    state = app.invoke(state, config=cfg)
 
-    # Loop: bis alle REQUIRED_KEYS vorhanden sind
-    max_rounds = 10
-    rounds = 0
-    while rounds < max_rounds:
-        missing = state.get("missing", [])
-        if not missing:
-            # genug Infos -> create_model wird im nächsten Resume ausgeführt / oder ist schon durch
-            break
+    # EIN Root-Run für die gesamte Session
+    with trace(
+        name="PerfModel Session",
+        project_name=os.getenv("LANGCHAIN_PROJECT"),
+        inputs={"entry": "start"},
+        tags=["perf-model", "langgraph"],
+        metadata={"thread_id": "gemini-loop-1"},
+        client=c,       # optional, wenn mehrere Clients
+    ) as root:
+        state: AgentState = {"answers": {}, "messages": []}
 
-        key = missing[0]
-        questions = {
-            "rps": "Wie viele Requests/s (rps)?",
-            "resp_size_kb": "Durchschnittliche Antwortgröße (resp_size_kb)?",
-            "latency_p95_ms": "Ziel-Latenz p95 (latency_p95_ms)?",
-            "service_count": "Wieviele Services im kritischen Pfad (service_count)?",
-            "db_type_qps": "DB-Typ und erwartete QPS (db_type_qps)?",
-        }
-        print(f"[Agent] {questions[key]} Bitte im Format key=value antworten.")
-        user = input("\nDu: ").strip()
-        if user.lower() in {"exit", "quit", "stop"}:
-            break
-        # parse key=value,merge
-        kv = parse_user_kv(user)
-        state["answers"].update(kv)
-        state["awaiting_input"] = False
+        # Start
+        state = app.invoke(state, config=cfg)
 
-        app.update_state(cfg, state)
+        # Loop
+        max_rounds = 10
+        rounds = 0
+        while rounds < max_rounds:
+            missing = state.get("missing", [])
+            if not missing:
+                break
 
+            key = missing[0]
+            questions = {
+                "rps": "Wie viele Requests/s (rps)?",
+                "resp_size_kb": "Durchschnittliche Antwortgröße (resp_size_kb)?",
+                "latency_p95_ms": "Ziel-Latenz p95 (latency_p95_ms)?",
+                "service_count": "Wieviele Services im kritischen Pfad (service_count)?",
+                "db_type_qps": "DB-Typ und erwartete QPS (db_type_qps)?",
+            }
+            print(f"[Agent] {questions[key]} Bitte im Format key=value antworten.")
+            user = input("\nDu: ").strip()
+            if user.lower() in {"exit", "quit", "stop"}:
+                break
 
-        # ein Schritt im Graph
-        state = app.invoke(None, config=cfg)
-        rounds += 1
+            kv = parse_user_kv(user)
+            state["answers"].update(kv)
+            state["awaiting_input"] = False
 
+            app.update_state(cfg, state)
+            state = app.invoke(None, config=cfg)
+            rounds += 1
 
+        # Optional: Outputs explizit setzen
+        root.end(outputs={"model": state.get("model")})
