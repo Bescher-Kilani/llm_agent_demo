@@ -156,7 +156,7 @@ if __name__ == "__main__":
 
     # EIN Root-Run für die gesamte Session
     with trace(
-        name="PerfModel Session",
+        name="llm-agent-demo",
         project_name=os.getenv("LANGCHAIN_PROJECT"),
         inputs={"entry": "start"},
         tags=["perf-model", "langgraph"],
