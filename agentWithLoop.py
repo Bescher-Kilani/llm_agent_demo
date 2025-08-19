@@ -100,7 +100,7 @@ def create_model(state: AgentState) -> AgentState:
         "db_type_qps sollte ein String wie 'Postgres 120' oder 'MongoDB 500' sein.\n"
     )
     # Call OpenAI model via LangSmith wrapper
-    resp = client.responses.create(model="gpt-4o-mini", input=prompt).output_text
+    resp = client.responses.create(model="gpt-5", input=prompt).output_text
     # Clean up code block markers if present
     if resp.strip().startswith("```"):
         resp = resp.strip().strip("`")
